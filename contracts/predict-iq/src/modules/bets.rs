@@ -161,7 +161,7 @@ pub fn withdraw_refund(
 ) -> Result<i128, ErrorCode> {
     bettor.require_auth();
 
-    let market = markets::get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
+    let mut market = markets::get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
 
     if market.status != MarketStatus::Cancelled {
         return Err(ErrorCode::MarketNotActive);
@@ -175,6 +175,7 @@ pub fn withdraw_refund(
         .ok_or(ErrorCode::MarketNotFound)?;
 
     let refund_amount = bet.amount;
+    let bet_outcome = bet.outcome;
 
     // Transfer refund to bettor
     let client = token::Client::new(e, &token_address);
@@ -182,6 +183,12 @@ pub fn withdraw_refund(
 
     // Remove bet record
     e.storage().persistent().remove(&bet_key);
+
+    // Update market accounting to maintain accuracy
+    market.total_staked = market.total_staked.saturating_sub(refund_amount);
+    let outcome_stake = market.outcome_stakes.get(bet_outcome).unwrap_or(0);
+    market.outcome_stakes.set(bet_outcome, outcome_stake.saturating_sub(refund_amount));
+    markets::update_market(e, market);
 
     // Emit standardized RewardsClaimed event (refund variant)
     // Topics: [RewardsClaimed, market_id, bettor]
