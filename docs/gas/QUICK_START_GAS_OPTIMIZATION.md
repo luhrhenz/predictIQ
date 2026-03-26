@@ -71,7 +71,7 @@ if metrics.gas_estimate > 1_000_000 {
         market_id, metrics.gas_estimate);
 }
 
-// Resolve with automatic payout mode selection
+// Resolve with automatic payout mode classification
 contract.resolve_market(market_id, winning_outcome);
 ```
 
@@ -81,22 +81,14 @@ contract.resolve_market(market_id, winning_outcome);
 
 ```rust
 pub enum PayoutMode {
-    Push,  // Contract distributes to all winners (≤50 winners)
-    Pull,  // Winners claim individually (>50 winners)
+    Push,  // Reserved compatibility flag
+    Pull,  // Active distribution path: winners claim individually
 }
 ```
 
-**Push Mode (Automatic for ≤50 winners):**
-- Contract distributes winnings in one transaction
-- Lower gas for winners (they don't pay)
-- Higher gas for resolver
-- Best for small markets
-
-**Pull Mode (Automatic for >50 winners):**
-- Winners claim individually
-- Lower gas for resolver
-- Winners pay their own gas
-- Best for large markets
+**Current Behavior:**
+- Winners claim individually through `claim_winnings` in all cases.
+- `PayoutMode` is selected at resolution time as metadata and compatibility signaling.
 
 ### Optimization Constants
 
@@ -154,10 +146,10 @@ let market_id = contract.create_market(
 contract.place_bet(user1, market_id, 0, 1000, token);
 contract.place_bet(user2, market_id, 1, 2000, token);
 
-// Resolve (automatic push mode - only 2 potential winners)
+// Resolve (mode may be set to Push for small winner counts)
 contract.resolve_market(market_id, 0);
 
-// Winner claims (if pull mode was used)
+// Winner claims (required in current implementation)
 contract.claim_winnings(user1, market_id, token);
 ```
 
@@ -182,7 +174,7 @@ let metrics = contract.get_resolution_metrics(market_id, winning_team);
 // metrics.winner_count might be 75 (many people bet on winner)
 // metrics.gas_estimate will be high
 
-// Resolve (automatic pull mode - >50 winners)
+// Resolve (mode typically set to Pull for >50 winners)
 contract.resolve_market(market_id, winning_team);
 
 // Each winner claims individually
@@ -230,7 +222,7 @@ Solution: Reduce number of outcomes or increase MAX_OUTCOMES_PER_MARKET
 ### High Gas Estimates
 ```
 Problem: get_resolution_metrics shows gas_estimate > 5M
-Solution: Market will automatically use pull payouts
+Solution: Resolve still succeeds with mode classification; claims stay pull-based
 Action: Inform users they need to claim winnings manually
 ```
 
@@ -240,7 +232,7 @@ Problem: Benchmark tests fail or show high CPU usage
 Solution: 
 1. Check if running on resource-constrained system
 2. Reduce MAX_OUTCOMES_PER_MARKET
-3. Lower MAX_PUSH_PAYOUT_WINNERS threshold
+3. Lower MAX_PUSH_PAYOUT_WINNERS classification threshold
 ```
 
 ## Best Practices
@@ -264,7 +256,7 @@ Solution:
    ```
 
 5. **Document payout mode for users**
-   - Inform users if they need to claim manually
+    - Inform users they need to claim manually in the current implementation
    - Provide clear UI for claiming winnings
 
 ## Resources

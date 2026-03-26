@@ -1,12 +1,13 @@
-#![no_std]
-use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
+#![cfg_attr(not(test), no_std)]
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
 pub mod errors;
 mod modules;
 mod test;
 pub mod types;
 
-use crate::errors::ErrorCode;
+pub use errors::ErrorCode;
+
 use crate::modules::admin;
 use crate::types::{CircuitBreakerState, ConfigKey};
 
@@ -91,6 +92,23 @@ impl PredictIQ {
 
     pub fn cancel_market_admin(e: Env, market_id: u64) -> Result<(), ErrorCode> {
         crate::modules::cancellation::cancel_market_admin(&e, market_id)
+    pub fn claim_winnings(
+        e: Env,
+        bettor: Address,
+        market_id: u64,
+        token_address: Address,
+    ) -> Result<i128, ErrorCode> {
+        crate::modules::bets::claim_winnings(&e, bettor, market_id, token_address)
+    }
+
+    pub fn withdraw_refund(
+        e: Env,
+        bettor: Address,
+        market_id: u64,
+        outcome: u32,
+        token_address: Address,
+    ) -> Result<i128, ErrorCode> {
+        crate::modules::bets::withdraw_refund(&e, bettor, market_id, token_address)
     }
 
     pub fn get_market(e: Env, id: u64) -> Option<crate::types::Market> {
@@ -180,6 +198,14 @@ impl PredictIQ {
         crate::modules::disputes::get_resolution_metrics(&e, market_id, outcome)
     }
 
+    pub fn set_max_push_payout_winners(e: Env, threshold: u32) -> Result<(), ErrorCode> {
+        crate::modules::disputes::set_max_push_payout_winners(&e, threshold)
+    }
+
+    pub fn get_max_push_payout_winners(e: Env) -> u32 {
+        crate::modules::disputes::get_max_push_payout_winners(&e)
+    }
+
     pub fn set_creator_reputation(
         e: Env,
         creator: Address,
@@ -229,7 +255,7 @@ impl PredictIQ {
         crate::modules::governance::get_guardians(&e)
     }
 
-    pub fn initiate_upgrade(e: Env, wasm_hash: String) -> Result<(), ErrorCode> {
+    pub fn initiate_upgrade(e: Env, wasm_hash: BytesN<32>) -> Result<(), ErrorCode> {
         crate::modules::governance::initiate_upgrade(&e, wasm_hash)
     }
 
@@ -237,7 +263,7 @@ impl PredictIQ {
         crate::modules::governance::vote_for_upgrade(&e, voter, vote_for)
     }
 
-    pub fn execute_upgrade(e: Env) -> Result<String, ErrorCode> {
+    pub fn execute_upgrade(e: Env) -> Result<(), ErrorCode> {
         crate::modules::governance::execute_upgrade(&e)
     }
 
@@ -256,5 +282,15 @@ impl PredictIQ {
     /// Prune (archive) a resolved market after 30 days grace period
     pub fn prune_market(e: Env, market_id: u64) -> Result<(), ErrorCode> {
         crate::modules::markets::prune_market(&e, market_id)
+    }
+
+    /// Get the minimum bet amount threshold
+    pub fn get_minimum_bet_amount(e: Env) -> i128 {
+        crate::modules::bets::get_minimum_bet_amount(&e)
+    }
+
+    /// Set the minimum bet amount threshold (admin only)
+    pub fn set_minimum_bet_amount(e: Env, amount: i128) -> Result<(), ErrorCode> {
+        crate::modules::bets::set_minimum_bet_amount(&e, amount)
     }
 }

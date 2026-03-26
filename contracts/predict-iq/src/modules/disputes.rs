@@ -1,6 +1,6 @@
 use crate::errors::ErrorCode;
 use crate::modules::markets;
-use crate::types::{MarketStatus, PayoutMode};
+use crate::types::{ConfigKey, MarketStatus, PayoutMode};
 use soroban_sdk::{contracttype, Address, Env};
 
 #[contracttype]
@@ -29,6 +29,7 @@ pub fn file_dispute(e: &Env, disciplinarian: Address, market_id: u64) -> Result<
     }
 
     market.status = MarketStatus::Disputed;
+    market.dispute_timestamp = Some(e.ledger().timestamp());
     // Extend resolution deadline for voting period
     market.resolution_deadline += 86400 * 3; // 3 days extension
     let new_deadline = market.resolution_deadline;
@@ -53,9 +54,10 @@ pub fn resolve_market(e: &Env, market_id: u64, winning_outcome: u32) -> Result<(
 
     // Estimate winner count (in production, maintain a counter)
     let estimated_winners = estimate_winner_count(e, market_id, winning_outcome);
+    let max_push_winners = get_max_push_payout_winners(e);
 
     // Automatically select payout mode based on winner count
-    if estimated_winners > crate::types::MAX_PUSH_PAYOUT_WINNERS {
+    if estimated_winners > max_push_winners {
         market.payout_mode = PayoutMode::Pull;
     } else {
         market.payout_mode = PayoutMode::Push;
@@ -79,6 +81,26 @@ pub fn resolve_market(e: &Env, market_id: u64, winning_outcome: u32) -> Result<(
     );
 
     Ok(())
+}
+
+pub fn set_max_push_payout_winners(e: &Env, threshold: u32) -> Result<(), ErrorCode> {
+    crate::modules::admin::require_admin(e)?;
+    e.storage()
+        .persistent()
+        .set(&ConfigKey::MaxPushPayoutWinners, &threshold);
+    e.storage().persistent().extend_ttl(
+        &ConfigKey::MaxPushPayoutWinners,
+        crate::types::GOV_TTL_LOW_THRESHOLD,
+        crate::types::GOV_TTL_HIGH_THRESHOLD,
+    );
+    Ok(())
+}
+
+pub fn get_max_push_payout_winners(e: &Env) -> u32 {
+    e.storage()
+        .persistent()
+        .get(&ConfigKey::MaxPushPayoutWinners)
+        .unwrap_or(crate::types::MAX_PUSH_PAYOUT_WINNERS)
 }
 
 // Helper function to estimate winner count without iterating all bets

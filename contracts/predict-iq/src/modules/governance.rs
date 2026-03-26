@@ -1,8 +1,17 @@
 use crate::errors::ErrorCode;
 use crate::types::{
     ConfigKey, Guardian, PendingUpgrade, MAJORITY_THRESHOLD_PERCENT, TIMELOCK_DURATION,
+    GOV_TTL_LOW_THRESHOLD, GOV_TTL_HIGH_THRESHOLD,
 };
-use soroban_sdk::{Address, Env, String, Vec};
+use soroban_sdk::{Address, BytesN, Env, Vec};
+
+/// Extend TTL for a governance key so it never expires during long inactivity.
+/// Called after every write to a governance storage slot.
+fn bump_gov_ttl(e: &Env, key: &ConfigKey) {
+    e.storage()
+        .persistent()
+        .extend_ttl(key, GOV_TTL_LOW_THRESHOLD, GOV_TTL_HIGH_THRESHOLD);
+}
 
 /// Initialize the GuardianSet with a list of guardians and their voting power.
 /// Only callable by admin during contract initialization.
@@ -18,6 +27,7 @@ pub fn initialize_guardians(e: &Env, guardians: Vec<Guardian>) -> Result<(), Err
     e.storage()
         .persistent()
         .set(&ConfigKey::GuardianSet, &guardians);
+    bump_gov_ttl(e, &ConfigKey::GuardianSet);
     Ok(())
 }
 
@@ -46,6 +56,7 @@ pub fn add_guardian(e: &Env, guardian: Guardian) -> Result<(), ErrorCode> {
     e.storage()
         .persistent()
         .set(&ConfigKey::GuardianSet, &guardians);
+    bump_gov_ttl(e, &ConfigKey::GuardianSet);
     Ok(())
 }
 
@@ -72,18 +83,14 @@ pub fn remove_guardian(e: &Env, address: Address) -> Result<(), ErrorCode> {
     e.storage()
         .persistent()
         .set(&ConfigKey::GuardianSet, &new_guardians);
+    bump_gov_ttl(e, &ConfigKey::GuardianSet);
     Ok(())
 }
 
 /// Initiate a contract upgrade. Requires admin authorization.
 /// Starts a 48-hour timelock and requires majority vote to execute.
-pub fn initiate_upgrade(e: &Env, wasm_hash: String) -> Result<(), ErrorCode> {
+pub fn initiate_upgrade(e: &Env, wasm_hash: BytesN<32>) -> Result<(), ErrorCode> {
     crate::modules::admin::require_admin(e)?;
-
-    // Validate WASM hash is not empty
-    if wasm_hash.is_empty() {
-        return Err(ErrorCode::InvalidWasmHash);
-    }
 
     // Check if an upgrade is already pending
     if e.storage().persistent().has(&ConfigKey::PendingUpgrade) {
@@ -103,6 +110,7 @@ pub fn initiate_upgrade(e: &Env, wasm_hash: String) -> Result<(), ErrorCode> {
     e.storage()
         .persistent()
         .set(&ConfigKey::PendingUpgrade, &pending_upgrade);
+    bump_gov_ttl(e, &ConfigKey::PendingUpgrade);
     Ok(())
 }
 
@@ -155,6 +163,7 @@ pub fn vote_for_upgrade(e: &Env, voter: Address, vote_for: bool) -> Result<bool,
     e.storage()
         .persistent()
         .set(&ConfigKey::PendingUpgrade, &pending_upgrade);
+    bump_gov_ttl(e, &ConfigKey::PendingUpgrade);
     Ok(true)
 }
 
@@ -174,19 +183,37 @@ fn is_majority_met(e: &Env, pending_upgrade: &PendingUpgrade) -> bool {
         return false;
     }
 
-    let total_guardians = guardians.len() as u32;
-    let votes_for = pending_upgrade.votes_for.len() as u32;
+    // Sum total voting power across all guardians
+    let mut total_power: u32 = 0;
+    for i in 0..guardians.len() {
+        total_power += guardians.get(i).unwrap().voting_power;
+    }
 
-    // Calculate percentage: (votes_for / total_guardians) * 100
-    let percentage = (votes_for * 100) / total_guardians;
+    if total_power == 0 {
+        return false;
+    }
+
+    // Sum voting power of guardians who voted for
+    let mut power_for: u32 = 0;
+    for i in 0..pending_upgrade.votes_for.len() {
+        let voter = pending_upgrade.votes_for.get(i).unwrap();
+        for j in 0..guardians.len() {
+            let g = guardians.get(j).unwrap();
+            if g.address == voter {
+                power_for += g.voting_power;
+                break;
+            }
+        }
+    }
+
+    // Calculate percentage: (power_for / total_power) * 100
+    let percentage = (power_for * 100) / total_power;
     percentage >= MAJORITY_THRESHOLD_PERCENT
 }
 
 /// Execute the upgrade if timelock is satisfied and majority voted in favor.
-/// This does NOT directly call update_current_contract_wasm (that's a host function).
-/// Instead, it validates conditions and clears the pending upgrade.
-/// The caller is responsible for invoking the host function.
-pub fn execute_upgrade(e: &Env) -> Result<String, ErrorCode> {
+/// This directly invokes the Soroban host upgrade function.
+pub fn execute_upgrade(e: &Env) -> Result<(), ErrorCode> {
     // Verify timelock has passed
     if !is_timelock_satisfied(e)? {
         return Err(ErrorCode::TimelockActive);
@@ -204,7 +231,10 @@ pub fn execute_upgrade(e: &Env) -> Result<String, ErrorCode> {
     // Clear pending upgrade
     e.storage().persistent().remove(&ConfigKey::PendingUpgrade);
 
-    Ok(wasm_hash)
+    // Execute host-level contract code upgrade.
+    e.deployer().update_current_contract_wasm(wasm_hash);
+
+    Ok(())
 }
 
 /// Get vote statistics for the pending upgrade.

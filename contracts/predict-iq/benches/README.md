@@ -98,7 +98,7 @@ Based on benchmark results:
    - Use more efficient storage keys
 
 3. **If resolve_market > 1M CPU**:
-   - Force pull payouts for all markets
+   - Keep pull-claim UX as default for all markets
    - Reduce MAX_PUSH_PAYOUT_WINNERS
 
 ## Continuous Monitoring

@@ -13,9 +13,9 @@ Markets with thousands of outcomes or winners could exceed Soroban's instruction
 
 #### Solution
 - **Outcome Limit**: Maximum 100 outcomes per market (`MAX_OUTCOMES_PER_MARKET`)
-- **Automatic Payout Mode Selection**: 
-  - Push payouts: For markets with ≤50 winners (contract distributes)
-  - Pull payouts: For markets with >50 winners (users claim individually)
+- **Payout Mode Classification**:
+    - `Pull` is the active distribution path (winners claim individually)
+    - `Push` is currently a mode flag only; no batch push transfer routine exists
 
 #### Implementation
 ```rust
@@ -23,8 +23,8 @@ pub const MAX_OUTCOMES_PER_MARKET: u32 = 100;
 pub const MAX_PUSH_PAYOUT_WINNERS: u32 = 50;
 
 pub enum PayoutMode {
-    Push,  // Contract distributes to all winners
-    Pull,  // Winners claim individually
+    Push,  // Reserved compatibility flag
+    Pull,  // Winners claim individually via claim_winnings
 }
 ```
 
@@ -75,7 +75,7 @@ pub fn resolve_market(e: &Env, market_id: u64, winning_outcome: u32) -> Result<(
     // Estimate winner count
     let estimated_winners = estimate_winner_count(e, market_id, winning_outcome);
     
-    // Automatically select payout mode
+    // Select payout mode metadata
     if estimated_winners > MAX_PUSH_PAYOUT_WINNERS {
         market.payout_mode = PayoutMode::Pull;
     } else {
@@ -154,8 +154,8 @@ Tests:
 | Create Market | 100 | ~250K | ~15KB | ⚠ Monitor |
 | Create Market | 101 | N/A | N/A | ✗ Rejected |
 | Place Bet | 1 | ~30K | ~1KB | ✓ Safe |
-| Resolve (Push) | 50 winners | ~2.5M | ~50KB | ⚠ Threshold |
-| Resolve (Pull) | 1000 winners | ~100K | ~5KB | ✓ Safe |
+| Resolve (mode flag set) | 50 winners | ~2.5M | ~50KB | ⚠ Threshold |
+| Resolve (mode flag set) | 1000 winners | ~100K | ~5KB | ✓ Safe |
 
 ## Best Practices
 
@@ -166,9 +166,9 @@ Tests:
 
 ### For Contract Operators
 1. Set `MAX_OUTCOMES_PER_MARKET` based on network conditions
-2. Adjust `MAX_PUSH_PAYOUT_WINNERS` threshold as needed
+2. Adjust `MAX_PUSH_PAYOUT_WINNERS` for mode classification as needed
 3. Monitor instruction counts in production
-4. Use pull payouts for large markets
+4. Keep UX centered around pull claims (`claim_winnings`)
 
 ### For Developers
 1. Always test with maximum outcome counts
@@ -187,7 +187,7 @@ Tests:
 ### Alerts
 Set up monitoring for:
 - Markets approaching 100 outcomes
-- Resolution attempts with >50 winners in push mode
+- Markets classified as `Push` that still require pull claims
 - Instruction counts exceeding 80% of limits
 
 ## Future Optimizations
@@ -218,4 +218,4 @@ Set up monitoring for:
 - Optimized `OracleConfig` with `Option<u32>`
 - Added `get_resolution_metrics` function
 - Created comprehensive benchmarking suite
-- Automatic payout mode selection in `resolve_market`
+- Automatic payout mode classification in `resolve_market`
