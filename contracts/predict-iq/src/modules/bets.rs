@@ -21,7 +21,6 @@ pub fn place_bet(
 ) -> Result<(), ErrorCode> {
     bettor.require_auth();
 
-    // Check if contract is paused - high-risk operation
     crate::modules::circuit_breaker::require_not_paused_for_high_risk(e)?;
 
     if amount <= 0 {
@@ -41,7 +40,6 @@ pub fn place_bet(
         return Err(ErrorCode::MarketClosed);
     }
 
-    // Validate parent market conditions for conditional markets
     if market.parent_id > 0 {
         markets::validate_parent_market(e, market.parent_id, market.parent_outcome_idx)?;
     }
@@ -62,12 +60,10 @@ pub fn place_bet(
         return Err(ErrorCode::InvalidOutcome);
     }
 
-    // Validate token_address matches market's configured asset
     if token_address != market.token_address {
         return Err(ErrorCode::InvalidBetAmount);
     }
 
-    // Transfer tokens from bettor to contract using SAC-safe transfer
     sac::safe_transfer(
         e,
         &token_address,
@@ -91,10 +87,15 @@ pub fn place_bet(
     let outcome_stake = market.outcome_stakes.get(outcome).unwrap_or(0);
     market.outcome_stakes.set(outcome, outcome_stake + amount);
 
+    // Issue #24: Maintain actual winner count per outcome
+    let is_new_bettor = existing_bet.amount == amount; // first bet on this outcome
+    if is_new_bettor {
+        let current_count = market.winner_counts.get(outcome).unwrap_or(0);
+        market.winner_counts.set(outcome, current_count + 1);
+    }
+
     e.storage().persistent().set(&bet_key, &existing_bet);
     markets::update_market(e, market);
-
-    // Bump TTL for market data to prevent state expiration
     markets::bump_market_ttl(e, market_id);
 
     // Track referral reward

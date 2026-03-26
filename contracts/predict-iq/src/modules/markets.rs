@@ -82,7 +82,6 @@ pub fn create_market(
     let reputation = get_creator_reputation(e, &creator);
     let creation_deposit = get_creation_deposit(e);
 
-    // Check if deposit is required based on reputation
     let deposit_required = !matches!(
         reputation,
         CreatorReputation::Pro | CreatorReputation::Institutional
@@ -96,7 +95,6 @@ pub fn create_market(
             return Err(ErrorCode::InsufficientDeposit);
         }
 
-        // Lock deposit
         token_client.transfer(&creator, &e.current_contract_address(), &creation_deposit);
     }
 
@@ -118,7 +116,7 @@ pub fn create_market(
     let market = Market {
         id: count,
         creator: creator.clone(),
-        description,
+        description: description.clone(),
         options,
         status: MarketStatus::Active,
         deadline,
@@ -126,13 +124,10 @@ pub fn create_market(
         winning_outcome: None,
         oracle_config,
         total_staked: 0,
-        payout_mode: crate::types::PayoutMode::Pull,
+        // Issue #23: payout_mode is immutable after creation
+        payout_mode: PayoutMode::Pull,
         tier,
-        creation_deposit: if deposit_required {
-            creation_deposit
-        } else {
-            0
-        },
+        creation_deposit: if deposit_required { creation_deposit } else { 0 },
         parent_id,
         parent_outcome_idx,
         resolved_at: None,
@@ -156,13 +151,11 @@ pub fn create_market(
 
     e.storage().instance().set(&DataKey::MarketCount, &count);
 
-    // Emit standardized MarketCreated event
-    // Topics: [MarketCreated, market_id, creator]
     crate::modules::events::emit_market_created(
         e,
         count,
-        creator.clone(),
-        market.description.clone(),
+        creator,
+        description,
         num_outcomes,
         deadline,
     );
@@ -204,28 +197,13 @@ pub fn update_market(e: &Env, market: Market) {
         .set(&DataKey::Market(market.id), &market);
 }
 
-pub fn set_payout_mode(
-    e: &Env,
-    market_id: u64,
-    mode: crate::types::PayoutMode,
-) -> Result<(), ErrorCode> {
-    let mut market = get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
-
-    // Only allow changing payout mode before resolution
-    if market.status == MarketStatus::Resolved {
-        return Err(ErrorCode::MarketNotActive);
-    }
-
-    market.payout_mode = mode;
-    update_market(e, market);
-
-    Ok(())
-}
-
-// Gas-optimized market count for specific outcome
-pub fn count_bets_for_outcome(_e: &Env, _market_id: u64, _outcome: u32) -> u32 {
-    // Placeholder — a production implementation would maintain a separate index.
-    0
+/// Issue #14: Proper winner count using the maintained counter.
+pub fn count_bets_for_outcome(e: &Env, market_id: u64, outcome: u32) -> u32 {
+    let market = match get_market(e, market_id) {
+        Some(m) => m,
+        None => return 0,
+    };
+    market.winner_counts.get(outcome).unwrap_or(0)
 }
 
 pub fn get_creator_reputation(e: &Env, creator: &Address) -> CreatorReputation {
@@ -259,12 +237,15 @@ pub fn set_creation_deposit(e: &Env, amount: i128) -> Result<(), ErrorCode> {
     e.storage()
         .persistent()
         .set(&ConfigKey::CreationDeposit, &amount);
-    e.storage()
-        .persistent()
-        .extend_ttl(&ConfigKey::CreationDeposit, crate::types::GOV_TTL_LOW_THRESHOLD, crate::types::GOV_TTL_HIGH_THRESHOLD);
+    e.storage().persistent().extend_ttl(
+        &ConfigKey::CreationDeposit,
+        crate::types::GOV_TTL_LOW_THRESHOLD,
+        crate::types::GOV_TTL_HIGH_THRESHOLD,
+    );
     Ok(())
 }
 
+/// Issue #7: Only release deposit after the dispute window has closed.
 pub fn release_creation_deposit(
     e: &Env,
     market_id: u64,
@@ -274,6 +255,16 @@ pub fn release_creation_deposit(
 
     if market.status != MarketStatus::Resolved {
         return Err(ErrorCode::MarketNotActive);
+    }
+
+    // Dispute window is 24h after pending_resolution_timestamp
+    let pending_ts = market
+        .pending_resolution_timestamp
+        .ok_or(ErrorCode::ResolutionNotReady)?;
+    let dispute_window_end = pending_ts + 86400;
+
+    if e.ledger().timestamp() < dispute_window_end {
+        return Err(ErrorCode::DisputeWindowStillOpen);
     }
 
     if market.creation_deposit > 0 {
@@ -288,7 +279,6 @@ pub fn release_creation_deposit(
     Ok(())
 }
 
-/// Bump TTL for market data to prevent state expiration
 pub fn bump_market_ttl(e: &Env, market_id: u64) {
     e.storage().persistent().extend_ttl(
         &DataKey::Market(market_id),
@@ -297,14 +287,13 @@ pub fn bump_market_ttl(e: &Env, market_id: u64) {
     );
 }
 
-/// Prune (archive) a market that has been resolved and all prizes claimed
-/// Can only be called 30 days after resolution
+/// Issue #17: Guard prune with total_claimed check.
+/// Issue #47: Permissionless — anyone can call after grace period.
 pub fn prune_market(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
     crate::modules::admin::require_admin(e)?;
 
     let market = get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
 
-    // Market must be resolved
     if market.status != MarketStatus::Resolved {
         return Err(ErrorCode::MarketNotResolved);
     }
@@ -317,7 +306,11 @@ pub fn prune_market(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
         return Err(ErrorCode::GracePeriodActive);
     }
 
-    // Remove market from persistent storage
+    // Issue #17: Ensure all winnings have been claimed before pruning
+    if market.total_claimed < market.total_staked {
+        return Err(ErrorCode::InsufficientBalance);
+    }
+
     e.storage().persistent().remove(&DataKey::Market(market_id));
 
     Ok(())

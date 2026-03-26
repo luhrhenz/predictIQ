@@ -3,11 +3,11 @@ use crate::modules::{markets, oracles, voting};
 use crate::types::MarketStatus;
 use soroban_sdk::{Env, Symbol};
 
-const DISPUTE_WINDOW_SECONDS: u64 = 86400; // 24 hours
-const VOTING_PERIOD_SECONDS: u64 = 259200; // 72 hours
-const MAJORITY_THRESHOLD_BPS: i128 = 6000; // 60%
+/// Issue #8: Increased from 24h to 48h for global participation.
+const DISPUTE_WINDOW_SECONDS: u64 = 172_800; // 48 hours
+const VOTING_PERIOD_SECONDS: u64 = 259_200;  // 72 hours
+const MAJORITY_THRESHOLD_BPS: i128 = 6000;   // 60%
 
-/// T+0: Attempt oracle resolution at resolution deadline
 pub fn attempt_oracle_resolution(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
     let mut market = markets::get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
 
@@ -38,7 +38,6 @@ pub fn attempt_oracle_resolution(e: &Env, market_id: u64) -> Result<(), ErrorCod
     }
 }
 
-/// T+24h: Finalize resolution if no dispute filed
 pub fn finalize_resolution(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
     let mut market = markets::get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
 
@@ -55,6 +54,7 @@ pub fn finalize_resolution(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
             // No dispute filed, finalize with oracle result
             let winning_outcome = market.winning_outcome.unwrap();
             market.status = MarketStatus::Resolved;
+            market.resolved_at = Some(e.ledger().timestamp());
             markets::update_market(e, market);
 
             e.events().publish(
@@ -79,6 +79,7 @@ pub fn finalize_resolution(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
 
             market.status = MarketStatus::Resolved;
             market.winning_outcome = Some(winning_outcome);
+            market.resolved_at = Some(e.ledger().timestamp());
             markets::update_market(e, market);
 
             e.events().publish(
@@ -93,15 +94,10 @@ pub fn finalize_resolution(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
     }
 }
 
-/// Calculate voting outcome with 60% majority requirement.
-///
-/// Single-pass O(n) tally — no intermediate allocations.
-/// `n` is bounded by `MAX_OUTCOMES_PER_MARKET` (32), so this is safe to call
-/// from the permissionless `finalize_resolution` without gas-griefing risk.
+/// Single-pass O(n) tally. n is bounded by MAX_OUTCOMES_PER_MARKET (32).
 fn calculate_voting_outcome(e: &Env, market: &crate::types::Market) -> Result<u32, ErrorCode> {
     let num_outcomes = market.options.len();
 
-    // Defensive: enforce the cap even for markets that pre-date the constant.
     if num_outcomes > crate::types::MAX_OUTCOMES_PER_MARKET {
         return Err(ErrorCode::TooManyOutcomes);
     }

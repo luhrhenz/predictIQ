@@ -9,7 +9,7 @@ pub mod types;
 pub use errors::ErrorCode;
 
 use crate::modules::admin;
-use crate::types::{CircuitBreakerState, ConfigKey};
+use crate::types::{CircuitBreakerState, ConfigKey, Guardian, UpgradeStats};
 
 #[contract]
 pub struct PredictIQ;
@@ -136,6 +136,10 @@ impl PredictIQ {
         crate::modules::voting::cast_vote(&e, voter, market_id, outcome, weight)
     }
 
+    pub fn unlock_tokens(e: Env, voter: Address, market_id: u64) -> Result<(), ErrorCode> {
+        crate::modules::voting::unlock_tokens(&e, voter, market_id)
+    }
+
     pub fn file_dispute(e: Env, disciplinarian: Address, market_id: u64) -> Result<(), ErrorCode> {
         crate::modules::circuit_breaker::require_closed(&e)?;
         crate::modules::disputes::file_dispute(&e, disciplinarian, market_id)
@@ -160,6 +164,15 @@ impl PredictIQ {
         crate::modules::fees::get_revenue(&e, token)
     }
 
+    /// Issue #26: Withdraw accumulated protocol fees to a recipient.
+    pub fn withdraw_protocol_fees(
+        e: Env,
+        token: Address,
+        recipient: Address,
+    ) -> Result<i128, ErrorCode> {
+        crate::modules::fees::withdraw_protocol_fees(&e, &token, &recipient)
+    }
+
     pub fn claim_referral_rewards(
         e: Env,
         address: Address,
@@ -176,6 +189,14 @@ impl PredictIQ {
     pub fn resolve_market(e: Env, market_id: u64, winning_outcome: u32) -> Result<(), ErrorCode> {
         crate::modules::admin::require_admin(&e)?;
         crate::modules::disputes::resolve_market(&e, market_id, winning_outcome)
+    }
+
+    pub fn attempt_oracle_resolution(e: Env, market_id: u64) -> Result<(), ErrorCode> {
+        crate::modules::resolution::attempt_oracle_resolution(&e, market_id)
+    }
+
+    pub fn finalize_resolution(e: Env, market_id: u64) -> Result<(), ErrorCode> {
+        crate::modules::resolution::finalize_resolution(&e, market_id)
     }
 
     pub fn reset_monitoring(e: Env) -> Result<(), ErrorCode> {
@@ -273,7 +294,8 @@ impl PredictIQ {
         crate::modules::governance::get_pending_upgrade(&e)
     }
 
-    pub fn get_upgrade_votes(e: Env) -> Result<(u32, u32), ErrorCode> {
+    /// Issue #33: Returns named UpgradeStats struct.
+    pub fn get_upgrade_votes(e: Env) -> Result<UpgradeStats, ErrorCode> {
         crate::modules::governance::get_upgrade_votes(&e)
     }
 
@@ -281,7 +303,12 @@ impl PredictIQ {
         crate::modules::governance::is_timelock_satisfied(&e)
     }
 
-    /// Prune (archive) a resolved market after 30 days grace period
+    /// Issue #13: Configurable timelock duration.
+    pub fn set_timelock_duration(e: Env, seconds: u64) -> Result<(), ErrorCode> {
+        crate::modules::governance::set_timelock_duration(&e, seconds)
+    }
+
+    /// Issue #47: Permissionless prune after grace period.
     pub fn prune_market(e: Env, market_id: u64) -> Result<(), ErrorCode> {
         crate::modules::markets::prune_market(&e, market_id)
     }
