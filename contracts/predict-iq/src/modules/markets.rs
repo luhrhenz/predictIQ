@@ -10,6 +10,7 @@ pub enum DataKey {
     Market(u64),
     MarketCount,
     CreatorReputation(Address),
+    OutcomeStake(u64, u32), // market_id, outcome
 }
 
 pub fn create_market(
@@ -110,9 +111,8 @@ pub fn create_market(
     let num_outcomes = options.len() as u32;
 
     // Pre-initialize outcome_stakes map with 0 for all outcomes to optimize gas
-    let mut outcome_stakes = soroban_sdk::Map::new(e);
     for i in 0..num_outcomes {
-        outcome_stakes.set(i, 0);
+        set_outcome_stake(e, count, i, 0);
     }
 
     let market = Market {
@@ -134,7 +134,6 @@ pub fn create_market(
         parent_outcome_idx,
         resolved_at: None,
         token_address: native_token,
-        outcome_stakes,
         pending_resolution_timestamp: None,
         dispute_snapshot_ledger: None,
         dispute_timestamp: None,
@@ -314,6 +313,13 @@ pub fn prune_market(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
     }
 
     e.storage().persistent().remove(&DataKey::Market(market_id));
+
+    // Remove outcome stakes
+    for i in 0..market.options.len() as u32 {
+        e.storage()
+            .persistent()
+            .remove(&DataKey::OutcomeStake(market_id, i));
+    }
 
     Ok(())
 }

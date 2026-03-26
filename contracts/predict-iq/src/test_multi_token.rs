@@ -58,8 +58,8 @@ fn test_usdc_market_6_decimals() {
     // Verify total_staked
     let market = client.get_market(&market_id).unwrap();
     assert_eq!(market.total_staked, 1_500_000_000);
-    assert_eq!(market.outcome_stakes.get(0).unwrap(), 1_000_000_000);
-    assert_eq!(market.outcome_stakes.get(1).unwrap(), 500_000_000);
+    assert_eq!(client.get_outcome_stake(&market_id, &0), 1_000_000_000);
+    assert_eq!(client.get_outcome_stake(&market_id, &1), 500_000_000);
 }
 
 /// Test market creation and betting with XLM (7 decimals)
@@ -117,8 +117,8 @@ fn test_xlm_market_7_decimals() {
     // Verify total_staked
     let market = client.get_market(&market_id).unwrap();
     assert_eq!(market.total_staked, 30_000_000_000);
-    assert_eq!(market.outcome_stakes.get(0).unwrap(), 20_000_000_000);
-    assert_eq!(market.outcome_stakes.get(1).unwrap(), 10_000_000_000);
+    assert_eq!(client.get_outcome_stake(&market_id, &0), 20_000_000_000);
+    assert_eq!(client.get_outcome_stake(&market_id, &1), 10_000_000_000);
 }
 
 /// Test resolution and payout precision with USDC (6 decimals)

@@ -125,6 +125,10 @@ impl PredictIQ {
         crate::modules::markets::get_market(&e, id)
     }
 
+    pub fn get_outcome_stake(e: Env, market_id: u64, outcome: u32) -> i128 {
+        crate::modules::markets::get_outcome_stake(&e, market_id, outcome)
+    }
+
     pub fn cast_vote(
         e: Env,
         voter: Address,
