@@ -93,6 +93,7 @@ fn test_market_creation_fails_without_deposit() {
             max_staleness_seconds: 3600,
             max_confidence_bps: 200,
         max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
         max_confidence_bps: 100,
         },
         &types::MarketTier::Basic,
