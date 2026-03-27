@@ -352,6 +352,11 @@ impl PredictIQ {
         crate::modules::governance::set_timelock_duration(&e, seconds)
     }
 
+    /// Issue #13: Returns the currently active timelock duration in seconds.
+    pub fn get_timelock_duration(e: Env) -> u64 {
+        crate::modules::governance::get_timelock_duration(&e)
+    }
+
     /// Issue #47: Permissionless prune after grace period.
     pub fn prune_market(e: Env, market_id: u64) -> Result<(), ErrorCode> {
         crate::modules::markets::prune_market(&e, market_id)
