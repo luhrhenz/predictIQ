@@ -114,7 +114,7 @@ pub enum ConfigKey {
     GuardianSet,
     PendingUpgrade,
     UpgradeVotes,
-    UpgradeRejectedAt(String),
+    UpgradeRejectedAt(BytesN<32>),
     GovernanceToken,
     MaxPushPayoutWinners,
     PendingGuardianRemoval,

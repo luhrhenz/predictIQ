@@ -975,7 +975,7 @@ fn test_same_hash_cannot_be_reinitiated_while_pending() {
     });
     client.initialize_guardians(&guardians);
 
-    let wasm_hash = String::from_str(&e, "repeat_hash");
+    let wasm_hash = BytesN::from_array(&e, &[1u8; 32]);
     e.ledger().with_mut(|li| li.timestamp = 1000);
 
     client.initiate_upgrade(&wasm_hash);
@@ -996,8 +996,8 @@ fn test_different_hash_still_blocked_while_another_upgrade_is_pending() {
     });
     client.initialize_guardians(&guardians);
 
-    let hash_a = String::from_str(&e, "hash_a");
-    let hash_b = String::from_str(&e, "hash_b");
+    let hash_a = BytesN::from_array(&e, &[2u8; 32]);
+    let hash_b = BytesN::from_array(&e, &[3u8; 32]);
     e.ledger().with_mut(|li| li.timestamp = 1000);
 
     client.initiate_upgrade(&hash_a);
@@ -1028,7 +1028,7 @@ fn test_rejected_hash_blocked_during_cooldown() {
     });
     client.initialize_guardians(&guardians);
 
-    let wasm_hash = String::from_str(&e, "cooldown_hash");
+    let wasm_hash = BytesN::from_array(&e, &[4u8; 32]);
     e.ledger().with_mut(|li| li.timestamp = 1000);
     client.initiate_upgrade(&wasm_hash);
     client.vote_for_upgrade(&guardian1, &true);
@@ -1064,7 +1064,7 @@ fn test_rejected_hash_allowed_after_cooldown_expires() {
     });
     client.initialize_guardians(&guardians);
 
-    let wasm_hash = String::from_str(&e, "reinit_hash");
+    let wasm_hash = BytesN::from_array(&e, &[5u8; 32]);
     e.ledger().with_mut(|li| li.timestamp = 1000);
     client.initiate_upgrade(&wasm_hash);
     client.vote_for_upgrade(&guardian1, &true);
@@ -1104,7 +1104,7 @@ fn test_rejected_hash_still_blocked_at_exact_cooldown_boundary() {
     });
     client.initialize_guardians(&guardians);
 
-    let wasm_hash = String::from_str(&e, "boundary_hash");
+    let wasm_hash = BytesN::from_array(&e, &[6u8; 32]);
     e.ledger().with_mut(|li| li.timestamp = 1000);
     client.initiate_upgrade(&wasm_hash);
     client.vote_for_upgrade(&guardian1, &true);
