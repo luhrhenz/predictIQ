@@ -1,8 +1,9 @@
 use crate::errors::ErrorCode;
-use soroban_sdk::{token, Address, Env};
+use soroban_sdk::{symbol_short, token, Address, Env};
 
-/// Issue #11: Use try_invoke_contract so transfer failures are handled
-/// programmatically instead of relying on host panics.
+/// Issue #11: Use try_transfer so transfer failures are caught programmatically
+/// instead of relying on host panics. Maps any host error to TransferFailed and
+/// emits a `xfer_fail` event so callers can observe the failure without crashing.
 pub fn safe_transfer(
     e: &Env,
     token_address: &Address,
@@ -12,10 +13,22 @@ pub fn safe_transfer(
 ) -> Result<(), ErrorCode> {
     let client = token::Client::new(e, token_address);
 
-    // Attempt transfer - will panic if clawed back or frozen
-    client.transfer(from, to, amount);
-
-    Ok(())
+    client
+        .try_transfer(from, to, amount)
+        .map_err(|_| {
+            e.events().publish(
+                (symbol_short!("xfer_fail"), from.clone(), to.clone()),
+                (token_address.clone(), *amount),
+            );
+            ErrorCode::TransferFailed
+        })?
+        .map_err(|_| {
+            e.events().publish(
+                (symbol_short!("xfer_fail"), from.clone(), to.clone()),
+                (token_address.clone(), *amount),
+            );
+            ErrorCode::TransferFailed
+        })
 }
 
 /// Check if contract can receive tokens (not frozen)
@@ -40,7 +53,7 @@ pub fn detect_clawback(
     let actual_balance = client.balance(&e.current_contract_address());
 
     if actual_balance < expected_balance {
-        return Err(ErrorCode::InsufficientBalance);
+        return Err(ErrorCode::AssetClawedBack);
     }
 
     Ok(())

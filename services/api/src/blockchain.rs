@@ -602,20 +602,32 @@ impl BlockchainClient {
     }
 
     async fn handle_reorg_if_detected(&self, latest_ledger: u32) -> anyhow::Result<()> {
-        let key = keys::chain_last_seen_ledger(&self.network);
-        let previous = self.cache.get_json::<u32>(&key).await?.unwrap_or(0);
+        Self::handle_reorg_logic(
+            &self.cache,
+            &self.metrics,
+            &self.network,
+            self.confirmation_ledger_lag,
+            latest_ledger,
+        )
+        .await
+    }
 
-        if previous > 0 && latest_ledger + self.confirmation_ledger_lag < previous {
-            let purged = self
-                .cache
-                .del_by_pattern(&format!("{}:*", keys::CHAIN_PREFIX))
-                .await?;
-            self.metrics.observe_invalidation("chain_reorg", purged);
+    async fn handle_reorg_logic(
+        cache: &dyn ReorgCache,
+        metrics: &dyn ReorgMetrics,
+        network: &str,
+        lag: u32,
+        latest_ledger: u32,
+    ) -> anyhow::Result<()> {
+        let key = keys::chain_last_seen_ledger(network);
+        let previous = cache.get_ledger(&key).await?.unwrap_or(0);
+
+        if previous > 0 && latest_ledger + lag < previous {
+            let purged = cache.purge_chain_cache().await?;
+            metrics.observe_reorg_invalidation(purged);
         }
 
-        self.cache
-            .set_json(&key, &latest_ledger, Duration::from_secs(24 * 60 * 60))
-            .await?;
+        cache.set_ledger(&key, latest_ledger).await?;
         Ok(())
     }
 
@@ -717,5 +729,161 @@ impl BlockchainClient {
         tokio::spawn(async move {
             monitor_client.run_transaction_monitor().await;
         });
+    }
+}
+
+#[async_trait::async_trait]
+pub trait ReorgCache: Send + Sync {
+    async fn get_ledger(&self, key: &str) -> anyhow::Result<Option<u32>>;
+    async fn set_ledger(&self, key: &str, ledger: u32) -> anyhow::Result<()>;
+    async fn purge_chain_cache(&self) -> anyhow::Result<usize>;
+}
+
+pub trait ReorgMetrics: Send + Sync {
+    fn observe_reorg_invalidation(&self, count: usize);
+}
+
+#[async_trait::async_trait]
+impl ReorgCache for RedisCache {
+    async fn get_ledger(&self, key: &str) -> anyhow::Result<Option<u32>> {
+        self.get_json::<u32>(key).await
+    }
+
+    async fn set_ledger(&self, key: &str, ledger: u32) -> anyhow::Result<()> {
+        self.set_json(key, &ledger, Duration::from_secs(24 * 60 * 60))
+            .await
+    }
+
+    async fn purge_chain_cache(&self) -> anyhow::Result<usize> {
+        self.del_by_pattern(&format!("{}:*", keys::CHAIN_PREFIX))
+            .await
+    }
+}
+
+impl ReorgMetrics for Metrics {
+    fn observe_reorg_invalidation(&self, count: usize) {
+        self.observe_invalidation("chain_reorg", count);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    struct MockCache {
+        ledger: AsyncMutex<Option<u32>>,
+        purged_count: AsyncMutex<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ReorgCache for MockCache {
+        async fn get_ledger(&self, _key: &str) -> anyhow::Result<Option<u32>> {
+            Ok(*self.ledger.lock().await)
+        }
+
+        async fn set_ledger(&self, _key: &str, ledger: u32) -> anyhow::Result<()> {
+            *self.ledger.lock().await = Some(ledger);
+            Ok(())
+        }
+
+        async fn purge_chain_cache(&self) -> anyhow::Result<usize> {
+            let mut count = self.purged_count.lock().await;
+            *count += 1;
+            Ok(10) // Mock 10 items purged
+        }
+    }
+
+    struct MockMetrics {
+        invalidation_count: Mutex<usize>,
+    }
+
+    impl ReorgMetrics for MockMetrics {
+        fn observe_reorg_invalidation(&self, count: usize) {
+            *self.invalidation_count.lock().unwrap() += count;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reorg_no_previous_state() {
+        let cache = MockCache {
+            ledger: AsyncMutex::new(None),
+            purged_count: AsyncMutex::new(0),
+        };
+        let metrics = MockMetrics {
+            invalidation_count: Mutex::new(0),
+        };
+
+        BlockchainClient::handle_reorg_logic(&cache, &metrics, "test", 10, 100)
+            .await
+            .unwrap();
+
+        assert_eq!(*cache.ledger.lock().await, Some(100));
+        assert_eq!(*cache.purged_count.lock().await, 0);
+        assert_eq!(*metrics.invalidation_count.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_reorg_detected() {
+        // Previous = 100, Latest = 80, Lag = 5
+        // 80 + 5 = 85 < 100 -> REORG!
+        let cache = MockCache {
+            ledger: AsyncMutex::new(Some(100)),
+            purged_count: AsyncMutex::new(0),
+        };
+        let metrics = MockMetrics {
+            invalidation_count: Mutex::new(0),
+        };
+
+        BlockchainClient::handle_reorg_logic(&cache, &metrics, "test", 5, 80)
+            .await
+            .unwrap();
+
+        assert_eq!(*cache.ledger.lock().await, Some(80));
+        assert_eq!(*cache.purged_count.lock().await, 1);
+        assert_eq!(*metrics.invalidation_count.lock().unwrap(), 10);
+    }
+
+    #[tokio::test]
+    async fn test_reorg_not_detected_within_lag() {
+        // Previous = 100, Latest = 96, Lag = 5
+        // 96 + 5 = 101 >= 100 -> NO REORG
+        let cache = MockCache {
+            ledger: AsyncMutex::new(Some(100)),
+            purged_count: AsyncMutex::new(0),
+        };
+        let metrics = MockMetrics {
+            invalidation_count: Mutex::new(0),
+        };
+
+        BlockchainClient::handle_reorg_logic(&cache, &metrics, "test", 5, 96)
+            .await
+            .unwrap();
+
+        assert_eq!(*cache.ledger.lock().await, Some(96));
+        assert_eq!(*cache.purged_count.lock().await, 0);
+        assert_eq!(*metrics.invalidation_count.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_reorg_not_detected_advancing() {
+        // Previous = 100, Latest = 110, Lag = 5
+        // 110 + 5 = 115 >= 100 -> NO REORG
+        let cache = MockCache {
+            ledger: AsyncMutex::new(Some(100)),
+            purged_count: AsyncMutex::new(0),
+        };
+        let metrics = MockMetrics {
+            invalidation_count: Mutex::new(0),
+        };
+
+        BlockchainClient::handle_reorg_logic(&cache, &metrics, "test", 5, 110)
+            .await
+            .unwrap();
+
+        assert_eq!(*cache.ledger.lock().await, Some(110));
+        assert_eq!(*cache.purged_count.lock().await, 0);
+        assert_eq!(*metrics.invalidation_count.lock().unwrap(), 0);
     }
 }

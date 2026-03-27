@@ -407,14 +407,15 @@ fn test_tiered_commission_rates() {
 }
 
 #[test]
-fn test_admin_can_reduce_push_threshold_for_gas_intensive_tokens() {
+fn test_push_mode_market_fails_resolution_when_winners_exceed_threshold() {
     let (e, _admin, _contract_id, client) = setup_test_env();
     client.set_creation_deposit(&0);
 
     let creator = Address::generate(&e);
     let native_token = Address::generate(&e);
 
-    // Baseline: estimated_winners = 20 (tally=2000, avg bet proxy=100), default threshold=50.
+    // Issue #24: winner count now comes from the precise winner_counts counter,
+    // not the tally/100 heuristic. Seed the counter directly via storage.
     let market_default = create_test_market(
         &client,
         &e,
@@ -422,29 +423,32 @@ fn test_admin_can_reduce_push_threshold_for_gas_intensive_tokens() {
         types::MarketTier::Basic,
         &native_token,
     );
-    e.storage().persistent().set(
-        &crate::modules::voting::DataKey::VoteTally(market_default, 0),
-        &2000i128,
-    );
+    // Simulate 20 unique bettors on outcome 0 — below default threshold of 50.
+    let market_data_key = crate::modules::markets::DataKey::Market(market_default);
+    let mut m: types::Market = e.storage().persistent().get(&market_data_key).unwrap();
+    m.winner_counts.set(0, 20u32);
+    e.storage().persistent().set(&market_data_key, &m);
+
     client.resolve_market(&market_default, &0);
     let resolved_default = client.get_market(&market_default).unwrap();
     assert_eq!(resolved_default.payout_mode, types::PayoutMode::Push);
 
-    // Admin lowers threshold to make the same winner estimate switch to Pull.
+    // Admin lowers threshold so 20 winners now exceeds it → Pull.
     client.set_max_push_payout_winners(&10);
     assert_eq!(client.get_max_push_payout_winners(), 10);
 
-    let market_lowered = create_test_market(
+    let market_id = create_test_market(
         &client,
         &e,
         &creator,
         types::MarketTier::Basic,
         &native_token,
     );
-    e.storage().persistent().set(
-        &crate::modules::voting::DataKey::VoteTally(market_lowered, 0),
-        &2000i128,
-    );
+    let market_data_key2 = crate::modules::markets::DataKey::Market(market_lowered);
+    let mut m2: types::Market = e.storage().persistent().get(&market_data_key2).unwrap();
+    m2.winner_counts.set(0, 20u32);
+    e.storage().persistent().set(&market_data_key2, &m2);
+
     client.resolve_market(&market_lowered, &0);
     let resolved_lowered = client.get_market(&market_lowered).unwrap();
     assert_eq!(resolved_lowered.payout_mode, types::PayoutMode::Pull);
@@ -669,6 +673,36 @@ fn test_add_guardian() {
     assert_eq!(stored_guardians.len(), 2);
 }
 
+// Issue #19: Admin-Guardian separation tests
+
+#[test]
+fn test_add_admin_as_guardian_rejected() {
+    let (e, admin, _contract_id, client) = setup_test_env();
+
+    let guardian = Address::generate(&e);
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian { address: guardian.clone(), voting_power: 1 });
+    client.initialize_guardians(&guardians);
+
+    // Attempt to add the admin address as a guardian — must be rejected
+    let result = client.try_add_guardian(&types::Guardian {
+        address: admin.clone(),
+        voting_power: 1,
+    });
+    assert_eq!(result, Err(Ok(ErrorCode::NotAuthorized)));
+}
+
+#[test]
+fn test_initialize_guardians_with_admin_rejected() {
+    let (e, admin, _contract_id, client) = setup_test_env();
+
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian { address: admin.clone(), voting_power: 1 });
+
+    let result = client.try_initialize_guardians(&guardians);
+    assert_eq!(result, Err(Ok(ErrorCode::NotAuthorized)));
+}
+
 #[test]
 fn test_initiate_upgrade_starts_timelock() {
     let (e, admin, _contract_id, client) = setup_test_env();
@@ -793,6 +827,66 @@ fn test_insufficient_votes_to_execute() {
     // Execute should fail - insufficient votes
     let result = client.try_execute_upgrade();
     assert_eq!(result, Err(Ok(ErrorCode::InsufficientVotes)));
+}
+
+// Issue #13: configurable timelock tests
+
+#[test]
+fn test_set_timelock_duration_and_early_execution() {
+    let (e, _admin, _contract_id, client) = setup_test_env();
+
+    let guardian = Address::generate(&e);
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian {
+        address: guardian.clone(),
+        voting_power: 1,
+    });
+    client.initialize_guardians(&guardians);
+
+    // Reduce timelock to 6 hours (minimum allowed)
+    let six_hours: u64 = 6 * 60 * 60;
+    assert!(client.try_set_timelock_duration(&six_hours).is_ok());
+
+    let wasm_hash = upgrade_wasm_hash(&e);
+    e.ledger().set_timestamp(1000);
+    client.initiate_upgrade(&wasm_hash);
+    client.vote_for_upgrade(&guardian, &true);
+
+    // Still blocked before 6 hours
+    e.ledger().set_timestamp(1000 + six_hours - 1);
+    assert_eq!(client.try_execute_upgrade(), Err(Ok(ErrorCode::TimelockActive)));
+
+    // Succeeds exactly at 6 hours
+    e.ledger().set_timestamp(1000 + six_hours);
+    assert!(client.try_execute_upgrade().is_ok());
+}
+
+#[test]
+fn test_set_timelock_duration_out_of_range_rejected() {
+    let (_e, _admin, _contract_id, client) = setup_test_env();
+
+    // Below minimum (6h)
+    assert_eq!(
+        client.try_set_timelock_duration(&(6 * 3600 - 1)),
+        Err(Ok(ErrorCode::InvalidAmount))
+    );
+    // Above maximum (7 days)
+    assert_eq!(
+        client.try_set_timelock_duration(&(7 * 24 * 3600 + 1)),
+        Err(Ok(ErrorCode::InvalidAmount))
+    );
+}
+
+#[test]
+fn test_get_timelock_duration_default_and_updated() {
+    let (_e, _admin, _contract_id, client) = setup_test_env();
+
+    // Default should be 48 hours
+    assert_eq!(client.get_timelock_duration(), 48 * 3600);
+
+    // After update, reflects new value
+    client.set_timelock_duration(&(6 * 3600));
+    assert_eq!(client.get_timelock_duration(), 6 * 3600);
 }
 
 #[test]
@@ -975,7 +1069,7 @@ fn test_same_hash_cannot_be_reinitiated_while_pending() {
     });
     client.initialize_guardians(&guardians);
 
-    let wasm_hash = String::from_str(&e, "repeat_hash");
+    let wasm_hash = BytesN::from_array(&e, &[1u8; 32]);
     e.ledger().with_mut(|li| li.timestamp = 1000);
 
     client.initiate_upgrade(&wasm_hash);
@@ -996,8 +1090,8 @@ fn test_different_hash_still_blocked_while_another_upgrade_is_pending() {
     });
     client.initialize_guardians(&guardians);
 
-    let hash_a = String::from_str(&e, "hash_a");
-    let hash_b = String::from_str(&e, "hash_b");
+    let hash_a = BytesN::from_array(&e, &[2u8; 32]);
+    let hash_b = BytesN::from_array(&e, &[3u8; 32]);
     e.ledger().with_mut(|li| li.timestamp = 1000);
 
     client.initiate_upgrade(&hash_a);
@@ -1028,7 +1122,7 @@ fn test_rejected_hash_blocked_during_cooldown() {
     });
     client.initialize_guardians(&guardians);
 
-    let wasm_hash = String::from_str(&e, "cooldown_hash");
+    let wasm_hash = BytesN::from_array(&e, &[4u8; 32]);
     e.ledger().with_mut(|li| li.timestamp = 1000);
     client.initiate_upgrade(&wasm_hash);
     client.vote_for_upgrade(&guardian1, &true);
@@ -1064,7 +1158,7 @@ fn test_rejected_hash_allowed_after_cooldown_expires() {
     });
     client.initialize_guardians(&guardians);
 
-    let wasm_hash = String::from_str(&e, "reinit_hash");
+    let wasm_hash = BytesN::from_array(&e, &[5u8; 32]);
     e.ledger().with_mut(|li| li.timestamp = 1000);
     client.initiate_upgrade(&wasm_hash);
     client.vote_for_upgrade(&guardian1, &true);
@@ -1104,7 +1198,7 @@ fn test_rejected_hash_still_blocked_at_exact_cooldown_boundary() {
     });
     client.initialize_guardians(&guardians);
 
-    let wasm_hash = String::from_str(&e, "boundary_hash");
+    let wasm_hash = BytesN::from_array(&e, &[6u8; 32]);
     e.ledger().with_mut(|li| li.timestamp = 1000);
     client.initiate_upgrade(&wasm_hash);
     client.vote_for_upgrade(&guardian1, &true);
@@ -1822,7 +1916,7 @@ fn test_voting_works_with_optimized_vote_struct() {
     );
 
     // Move to PendingResolution then dispute
-    client.set_oracle_result(&market_id, &0);
+    client.set_oracle_result(&market_id, &0, &0);
     e.ledger().with_mut(|li| li.timestamp = resolution_deadline);
     client.attempt_oracle_resolution(&market_id);
 
@@ -1889,7 +1983,7 @@ fn test_double_vote_still_rejected_with_optimized_struct() {
         &0,
     );
 
-    client.set_oracle_result(&market_id, &0);
+    client.set_oracle_result(&market_id, &0, &0);
     e.ledger().with_mut(|li| li.timestamp = resolution_deadline);
     client.attempt_oracle_resolution(&market_id);
 
@@ -1908,4 +2002,25 @@ fn test_double_vote_still_rejected_with_optimized_struct() {
     assert_eq!(result, Err(Ok(crate::errors::ErrorCode::AlreadyVoted)));
 }
 
+
+
+#[test]
+fn test_initialize_rejects_non_deployer() {
+    let e = Env::default();
+    // Do NOT mock all auths — we want auth to be enforced.
+    // Register the contract without initializing it.
+    let contract_id = e.register(PredictIQ, ());
+    let client = PredictIQClient::new(&e, &contract_id);
+
+    let attacker = Address::generate(&e);
+    let mut guardians = soroban_sdk::Vec::new(&e);
+    guardians.push_back(types::Guardian {
+        address: Address::generate(&e),
+        voting_power: 1,
+    });
+
+    // An attacker (non-deployer) attempting to initialize must fail.
+    let result = client.try_initialize(&attacker, &100, &guardians);
+    assert!(result.is_err());
+}
 

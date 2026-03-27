@@ -28,7 +28,7 @@ pub fn get_base_fee(e: &Env) -> i128 {
 }
 
 pub fn set_base_fee(e: &Env, amount: i128) -> Result<(), ErrorCode> {
-    admin::require_fee_admin(e)?;
+    admin::require_admin(e)?;
     e.storage().persistent().set(&ConfigKey::BaseFee, &amount);
     bump_config_ttl(e, &ConfigKey::BaseFee);
     Ok(())
@@ -90,27 +90,13 @@ pub fn get_revenue(e: &Env, token: Address) -> i128 {
         .unwrap_or(0)
 }
 
-/// Issue #26: Allow FeeAdmin/Admin to withdraw accumulated protocol fees.
+/// Issue #26: Allow Admin to withdraw accumulated protocol fees.
 pub fn withdraw_protocol_fees(
     e: &Env,
     token: &Address,
     recipient: &Address,
 ) -> Result<i128, ErrorCode> {
-    // Allow either admin or fee_admin to withdraw
-    let is_admin = admin::get_admin(e)
-        .map(|a| {
-            a.try_require_auth().is_ok()
-        })
-        .unwrap_or(false);
-    let is_fee_admin = admin::get_fee_admin(e)
-        .map(|a| {
-            a.try_require_auth().is_ok()
-        })
-        .unwrap_or(false);
-
-    if !is_admin && !is_fee_admin {
-        return Err(ErrorCode::NotAuthorized);
-    }
+    admin::require_admin(e)?;
 
     let key = DataKey::FeeRevenue(token.clone());
     let balance: i128 = e.storage().persistent().get(&key).unwrap_or(0);
@@ -119,13 +105,16 @@ pub fn withdraw_protocol_fees(
         return Err(ErrorCode::InsufficientBalance);
     }
 
+    // Zero out the balance before the transfer (checks-effects-interactions).
     e.storage().persistent().set(&key, &0i128);
 
-    let client = soroban_sdk::token::Client::new(e, token);
-    client.transfer(&e.current_contract_address(), recipient, &balance);
+    soroban_sdk::token::Client::new(e, token)
+        .transfer(&e.current_contract_address(), recipient, &balance);
 
-    e.events()
-        .publish((Symbol::new(e, "fees_withdrawn"), recipient), balance);
+    e.events().publish(
+        (Symbol::new(e, "fees_withdrawn"), recipient.clone()),
+        (token.clone(), balance),
+    );
 
     Ok(balance)
 }
@@ -159,7 +148,6 @@ pub fn claim_referral_rewards(
     e.storage().persistent().set(&key, &0i128);
 
     let client = soroban_sdk::token::Client::new(e, token);
-    e.current_contract_address().require_auth();
     client.transfer(&e.current_contract_address(), address, &balance);
 
     crate::modules::events::emit_referral_claimed(e, 0, address.clone(), balance);
@@ -200,5 +188,145 @@ mod tests {
 
         assert_eq!(basic_fee, 4);
         assert_eq!(pro_fee, 3);
+    }
+}
+
+#[cfg(test)]
+mod withdrawal_tests {
+    use crate::{PredictIQ, PredictIQClient};
+    use soroban_sdk::{
+        testutils::Address as _,
+        token, Address, Env,
+    };
+    use crate::errors::ErrorCode;
+
+    fn setup() -> (Env, PredictIQClient<'static>, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(PredictIQ, ());
+        let client = PredictIQClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &100);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+        let token_address = token_id.address();
+
+        // Seed the contract with tokens so it can pay out fees
+        token::StellarAssetClient::new(&env, &token_address)
+            .mint(&contract_id, &1_000_000);
+
+        (env, client, admin, token_address, contract_id)
+    }
+
+    fn seed_fee_revenue(env: &Env, contract_id: &Address, token: &Address, amount: i128) {
+        use crate::modules::fees::DataKey;
+        env.as_contract(contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::FeeRevenue(token.clone()), &amount);
+        });
+    }
+
+    #[test]
+    fn test_fee_admin_can_withdraw() {
+        let (env, client, admin, token, contract_id) = setup();
+
+        let fee_admin = Address::generate(&env);
+        client.set_fee_admin(&fee_admin);
+
+        seed_fee_revenue(&env, &contract_id, &token, 500_000);
+
+        let treasury = Address::generate(&env);
+        let withdrawn = client.withdraw_protocol_fees(&token, &treasury);
+
+        assert_eq!(withdrawn, 500_000);
+        assert_eq!(client.get_revenue(&token), 0);
+        assert_eq!(
+            token::Client::new(&env, &token).balance(&treasury),
+            500_000
+        );
+    }
+
+    #[test]
+    fn test_admin_can_withdraw_when_no_fee_admin_set() {
+        let (env, client, _admin, token, contract_id) = setup();
+
+        // No fee_admin set — master admin should be accepted
+        seed_fee_revenue(&env, &contract_id, &token, 250_000);
+
+        let treasury = Address::generate(&env);
+        let withdrawn = client.withdraw_protocol_fees(&token, &treasury);
+
+        assert_eq!(withdrawn, 250_000);
+        assert_eq!(client.get_revenue(&token), 0);
+    }
+
+    #[test]
+    fn test_withdraw_returns_error_when_balance_is_zero() {
+        let (env, client, _admin, token, _contract_id) = setup();
+
+        let treasury = Address::generate(&env);
+        let result = client.try_withdraw_protocol_fees(&token, &treasury);
+
+        assert_eq!(result, Err(Ok(ErrorCode::InsufficientBalance)));
+    }
+
+    #[test]
+    fn test_unauthorized_address_cannot_withdraw() {
+        let (env, client, _admin, token, contract_id) = setup();
+
+        seed_fee_revenue(&env, &contract_id, &token, 100_000);
+
+        // Override auths so only a random address is authorized
+        let attacker = Address::generate(&env);
+        env.set_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &attacker,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "withdraw_protocol_fees",
+                args: (&token, &Address::generate(&env)).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let treasury = Address::generate(&env);
+        let result = client.try_withdraw_protocol_fees(&token, &treasury);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_balance_zeroed_after_withdrawal() {
+        let (env, client, _admin, token, contract_id) = setup();
+
+        seed_fee_revenue(&env, &contract_id, &token, 300_000);
+
+        let treasury = Address::generate(&env);
+        client.withdraw_protocol_fees(&token, &treasury);
+
+        // Revenue tracker must be zero
+        assert_eq!(client.get_revenue(&token), 0);
+
+        // Second withdrawal must fail
+        let result = client.try_withdraw_protocol_fees(&token, &treasury);
+        assert_eq!(result, Err(Ok(ErrorCode::InsufficientBalance)));
+    }
+
+    #[test]
+    fn test_withdrawal_transfers_exact_amount_to_recipient() {
+        let (env, client, _admin, token, contract_id) = setup();
+
+        let amount = 750_000i128;
+        seed_fee_revenue(&env, &contract_id, &token, amount);
+
+        let treasury = Address::generate(&env);
+        let before = token::Client::new(&env, &token).balance(&treasury);
+
+        client.withdraw_protocol_fees(&token, &treasury);
+
+        let after = token::Client::new(&env, &token).balance(&treasury);
+        assert_eq!(after - before, amount);
     }
 }

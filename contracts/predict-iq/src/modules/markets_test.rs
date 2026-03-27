@@ -602,3 +602,48 @@ fn test_prune_market_after_all_rewards_claimed() {
     let result = client.try_prune_market(&market_id);
     assert!(result.is_ok());
 }
+
+/// Issue #47: Any user can prune an expired resolved market without admin privileges.
+#[test]
+fn test_permissionless_prune_by_non_admin() {
+    let (env, client, admin) = setup();
+
+    let options = Vec::from_array(
+        &env,
+        [String::from_str(&env, "Yes"), String::from_str(&env, "No")],
+    );
+
+    let oracle_config = OracleConfig {
+        oracle_address: Address::generate(&env),
+        feed_id: String::from_str(&env, "test"),
+        min_responses: Some(1),
+        max_staleness_seconds: 3600,
+        max_confidence_bps: 100,
+    };
+
+    let token = Address::generate(&env);
+
+    env.ledger().set_timestamp(1000);
+
+    let market_id = client.create_market(
+        &admin,
+        &String::from_str(&env, "Test Market"),
+        &options,
+        &2000,
+        &3000,
+        &oracle_config,
+        &MarketTier::Basic,
+        &token,
+        &0,
+        &0,
+    );
+
+    client.resolve_market(&market_id, &0);
+
+    // Advance past 30-day grace period (31 days)
+    env.ledger().set_timestamp(1000 + 2_678_401);
+
+    // A random non-admin user triggers pruning
+    let result = client.try_prune_market(&market_id);
+    assert!(result.is_ok());
+}

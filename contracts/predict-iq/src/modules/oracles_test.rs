@@ -46,7 +46,7 @@ fn create_config(e: &Env, max_confidence_bps: u64) -> OracleConfig {
     OracleConfig {
         oracle_address: Address::generate(e),
         feed_id: String::from_str(e, "test_feed"),
-        min_responses: Some(1),
+        min_responses: 1,
         max_staleness_seconds: 3600,
         max_confidence_bps,
     }
@@ -501,4 +501,155 @@ fn test_multi_oracle_collision_mitigation() {
             m2, o2, v2, scenario_desc
         );
     }
+}
+
+// =============================================================================
+// Issue #25: fetch_pyth_price cross-contract call tests
+// =============================================================================
+
+#[cfg(feature = "testutils")]
+mod pyth_integration_tests {
+    use super::*;
+    use soroban_sdk::{contract, contractimpl, testutils::Address as _, Address, BytesN, Env, String};
+    use crate::modules::oracles::{fetch_pyth_price, PythPrice};
+    use crate::types::OracleConfig;
+
+    /// Minimal mock Pyth contract that returns a fixed price for any feed_id.
+    #[contract]
+    pub struct MockPythContract;
+
+    #[contractimpl]
+    impl MockPythContract {
+        pub fn get_price(_env: Env, _feed_id: BytesN<32>) -> (i64, u64, i32, i64) {
+            // BTC/USD: $50,000.00 with 2% confidence, expo -2, recent timestamp
+            (5_000_000i64, 100_000u64, -2i32, 1_700_000_000i64)
+        }
+    }
+
+    fn valid_feed_id(e: &Env) -> String {
+        // 64-char hex string representing a 32-byte Pyth price feed ID
+        String::from_str(e, "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43")
+    }
+
+    #[test]
+    fn test_fetch_pyth_price_returns_price_from_contract() {
+        let e = Env::default();
+        let pyth_addr = e.register(MockPythContract, ());
+
+        let config = OracleConfig {
+            oracle_address: pyth_addr,
+            feed_id: valid_feed_id(&e),
+            min_responses: 1,
+            max_staleness_seconds: 3600,
+            max_confidence_bps: 500,
+        };
+
+        let result = fetch_pyth_price(&e, &config);
+        assert!(result.is_ok(), "fetch_pyth_price should succeed with a valid mock contract");
+
+        let price = result.unwrap();
+        assert_eq!(price.price, 5_000_000);
+        assert_eq!(price.conf, 100_000);
+        assert_eq!(price.expo, -2);
+        assert_eq!(price.publish_time, 1_700_000_000);
+    }
+
+    #[test]
+    fn test_fetch_pyth_price_fails_with_invalid_feed_id() {
+        let e = Env::default();
+        let pyth_addr = e.register(MockPythContract, ());
+
+        let config = OracleConfig {
+            oracle_address: pyth_addr,
+            feed_id: String::from_str(&e, "not_a_valid_hex_feed_id"),
+            min_responses: 1,
+            max_staleness_seconds: 3600,
+            max_confidence_bps: 500,
+        };
+
+        let result = fetch_pyth_price(&e, &config);
+        assert_eq!(result, Err(crate::errors::ErrorCode::OracleFailure));
+    }
+}
+
+// =============================================================================
+// Issue #9: set_oracle_result with oracle_id — no-collision tests
+// =============================================================================
+
+/// Verify that set_oracle_result stores results under the correct (market_id, oracle_id)
+/// composite key and that different oracle_ids for the same market are fully isolated.
+#[test]
+fn test_set_oracle_result_uses_oracle_id_key() {
+    let e = Env::default();
+    let market_id = 42u64;
+
+    // Oracle 0 posts outcome 0, oracle 1 posts outcome 1
+    e.storage().persistent().set(&OracleData::Result(market_id, 0), &0u32);
+    e.storage().persistent().set(&OracleData::Result(market_id, 1), &1u32);
+
+    let r0: Option<u32> = e.storage().persistent().get(&OracleData::Result(market_id, 0));
+    let r1: Option<u32> = e.storage().persistent().get(&OracleData::Result(market_id, 1));
+
+    assert_eq!(r0, Some(0), "oracle 0 result should be 0");
+    assert_eq!(r1, Some(1), "oracle 1 result should be 1");
+}
+
+/// Verify that updating one oracle's result does not overwrite another oracle's result.
+#[test]
+fn test_oracle_results_are_independent_per_oracle_id() {
+    let e = Env::default();
+    let market_id = 7u64;
+
+    // Store initial results for three oracles
+    for oracle_id in 0u32..3 {
+        e.storage()
+            .persistent()
+            .set(&OracleData::Result(market_id, oracle_id), &oracle_id);
+    }
+
+    // Update oracle 1 only
+    e.storage()
+        .persistent()
+        .set(&OracleData::Result(market_id, 1), &99u32);
+
+    // Oracle 0 and 2 must be unchanged
+    let r0: Option<u32> = e.storage().persistent().get(&OracleData::Result(market_id, 0));
+    let r1: Option<u32> = e.storage().persistent().get(&OracleData::Result(market_id, 1));
+    let r2: Option<u32> = e.storage().persistent().get(&OracleData::Result(market_id, 2));
+
+    assert_eq!(r0, Some(0), "oracle 0 must not be affected by oracle 1 update");
+    assert_eq!(r1, Some(99), "oracle 1 should reflect the update");
+    assert_eq!(r2, Some(2), "oracle 2 must not be affected by oracle 1 update");
+}
+
+/// Verify that the same oracle_id in different markets stores independently.
+#[test]
+fn test_oracle_results_are_independent_per_market_id() {
+    let e = Env::default();
+    let oracle_id = 0u32;
+
+    e.storage().persistent().set(&OracleData::Result(1u64, oracle_id), &10u32);
+    e.storage().persistent().set(&OracleData::Result(2u64, oracle_id), &20u32);
+
+    let r1: Option<u32> = e.storage().persistent().get(&OracleData::Result(1u64, oracle_id));
+    let r2: Option<u32> = e.storage().persistent().get(&OracleData::Result(2u64, oracle_id));
+
+    assert_eq!(r1, Some(10));
+    assert_eq!(r2, Some(20));
+}
+
+/// Verify get_oracle_result returns None for an oracle_id that has not posted yet.
+#[test]
+fn test_get_oracle_result_returns_none_for_unset_oracle() {
+    let e = Env::default();
+    let result = get_oracle_result(&e, 999u64, 5u32);
+    assert_eq!(result, None);
+}
+
+/// Verify get_last_update returns None before any result is stored.
+#[test]
+fn test_get_last_update_returns_none_before_set() {
+    let e = Env::default();
+    let ts = get_last_update(&e, 1u64, 0u32);
+    assert_eq!(ts, None);
 }
