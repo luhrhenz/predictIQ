@@ -1,13 +1,49 @@
 use crate::errors::ErrorCode;
 use crate::modules::{markets, sac};
-use crate::types::{Bet, MarketStatus};
+use crate::types::{Bet, MarketStatus, BET_TTL_LOW_THRESHOLD, BET_TTL_HIGH_THRESHOLD};
 use soroban_sdk::{contracttype, token, Address, Env};
+
+/// TTL Strategy for per-user bet records (Issue #100)
+///
+/// Bet records (DataKey::Bet) are stored in persistent storage and MUST outlive
+/// the entire market lifecycle:
+///
+///   place_bet  →  market Active  →  PendingResolution  →  [Disputed 72h]  →  Resolved  →  claim_winnings
+///
+/// Worst-case timeline:
+///   - Market deadline:          up to any future date
+///   - Dispute window:           48 hours (resolution.rs)
+///   - Voting period:            72 hours (resolution.rs)
+///   - Admin fallback window:    configurable
+///   - Prune grace period:       30 days after resolution
+///
+/// To guarantee a bet record is readable at claim time we set:
+///   BET_TTL_HIGH_THRESHOLD = ~180 days  (target lifetime after each bump)
+///   BET_TTL_LOW_THRESHOLD  = ~90 days   (trigger a refresh when below this)
+///
+/// Bumps are applied at:
+///   1. place_bet        — establishes the initial 180-day window
+///   2. claim_winnings   — refreshes before the read so a long-lived market
+///                         cannot cause the record to expire mid-dispute
+///   3. withdraw_refund  — same protection for cancelled-market refunds
+///
+/// Claimed(u64, Address) sentinel records use the same TTL so the
+/// AlreadyClaimed guard remains valid for the full prune grace period.
+
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     Bet(u64, Address, u32), // market_id, bettor, outcome
     Claimed(u64, Address),  // market_id, bettor — set after claim
+}
+
+/// Extend the TTL of a bet record to BET_TTL_HIGH_THRESHOLD.
+/// Called at write time and again before any read that could race with expiry.
+fn bump_bet_ttl(e: &Env, key: &DataKey) {
+    e.storage()
+        .persistent()
+        .extend_ttl(key, BET_TTL_LOW_THRESHOLD, BET_TTL_HIGH_THRESHOLD);
 }
 
 pub fn place_bet(
@@ -95,6 +131,7 @@ pub fn place_bet(
     }
 
     e.storage().persistent().set(&bet_key, &existing_bet);
+    bump_bet_ttl(e, &bet_key); // Issue #100: ensure record survives full market lifecycle
     markets::update_market(e, market);
     markets::bump_market_ttl(e, market_id);
 
@@ -140,6 +177,9 @@ fn internal_claim_amount(
 
     if let Some(key) = claimed_key {
         e.storage().persistent().set(key, &true);
+        // Issue #100: keep the AlreadyClaimed sentinel alive for the full prune
+        // grace period so double-claim attempts are rejected even after resolution.
+        bump_bet_ttl(e, key);
     }
     e.storage().persistent().remove(bet_key);
 
@@ -172,6 +212,10 @@ pub fn claim_winnings(e: &Env, bettor: Address, market_id: u64) -> Result<i128, 
     if e.storage().persistent().has(&claimed_key) {
         return Err(ErrorCode::AlreadyClaimed);
     }
+
+    // Issue #100: refresh TTL before read — a long dispute window could otherwise
+    // cause the record to expire between bet placement and claim.
+    bump_bet_ttl(e, &bet_key);
 
     let bet: Bet = e
         .storage()
@@ -222,6 +266,11 @@ pub fn withdraw_refund(
     }
 
     let bet_key = DataKey::Bet(market_id, bettor.clone(), outcome);
+
+    // Issue #100: refresh TTL before read — cancelled markets may sit idle
+    // for extended periods before bettors claim their refunds.
+    bump_bet_ttl(e, &bet_key);
+
     let bet: Bet = e
         .storage()
         .persistent()

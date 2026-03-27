@@ -1,9 +1,8 @@
 use crate::errors::ErrorCode;
 use crate::types::{
-    ConfigKey, Guardian, PendingUpgrade, MAJORITY_THRESHOLD_PERCENT, TIMELOCK_DURATION,
-    UPGRADE_COOLDOWN_DURATION,
     ConfigKey, Guardian, PendingUpgrade, GOV_TTL_HIGH_THRESHOLD, GOV_TTL_LOW_THRESHOLD,
-    MAJORITY_THRESHOLD_PERCENT, TIMELOCK_DURATION,
+    MAJORITY_THRESHOLD_PERCENT, TIMELOCK_DURATION, TIMELOCK_MIN_SECONDS, TIMELOCK_MAX_SECONDS,
+    UPGRADE_COOLDOWN_DURATION,
 };
 use soroban_sdk::{Address, BytesN, Env, Vec};
 
@@ -26,6 +25,15 @@ pub fn initialize_guardians(e: &Env, guardians: Vec<Guardian>) -> Result<(), Err
         return Err(ErrorCode::NotAuthorized);
     }
 
+    // Issue #19: None of the initial guardians may be the Admin.
+    if let Some(admin) = crate::modules::admin::get_admin(e) {
+        for g in guardians.iter() {
+            if g.address == admin {
+                return Err(ErrorCode::NotAuthorized);
+            }
+        }
+    }
+
     e.storage()
         .persistent()
         .set(&ConfigKey::GuardianSet, &guardians);
@@ -44,6 +52,13 @@ pub fn get_guardians(e: &Env) -> Vec<Guardian> {
 /// Add a guardian to the set. Only callable by admin.
 pub fn add_guardian(e: &Env, guardian: Guardian) -> Result<(), ErrorCode> {
     crate::modules::admin::require_admin(e)?;
+
+    // Issue #19: Admin must not be in the Guardian set — enforces separation of powers.
+    if let Some(admin) = crate::modules::admin::get_admin(e) {
+        if guardian.address == admin {
+            return Err(ErrorCode::NotAuthorized);
+        }
+    }
 
     let mut guardians = get_guardians(e);
 
@@ -280,12 +295,33 @@ pub fn vote_for_upgrade(e: &Env, voter: Address, vote_for: bool) -> Result<bool,
     Ok(true)
 }
 
-/// Check if 48-hour timelock has passed.
+/// Issue #13: Get the effective timelock duration (storage override or default constant).
+pub fn get_timelock_duration(e: &Env) -> u64 {
+    e.storage()
+        .persistent()
+        .get(&ConfigKey::TimelockDuration)
+        .unwrap_or(TIMELOCK_DURATION)
+}
+
+/// Issue #13: Allow Guardian majority to set a new timelock duration within [6h, 7d].
+pub fn set_timelock_duration(e: &Env, seconds: u64) -> Result<(), ErrorCode> {
+    crate::modules::admin::require_admin(e)?;
+    if seconds < TIMELOCK_MIN_SECONDS || seconds > TIMELOCK_MAX_SECONDS {
+        return Err(ErrorCode::InvalidAmount);
+    }
+    e.storage()
+        .persistent()
+        .set(&ConfigKey::TimelockDuration, &seconds);
+    bump_gov_ttl(e, &ConfigKey::TimelockDuration);
+    Ok(())
+}
+
+/// Check if the configurable timelock has passed.
 pub fn is_timelock_satisfied(e: &Env) -> Result<bool, ErrorCode> {
     let pending_upgrade = get_pending_upgrade(e).ok_or(ErrorCode::UpgradeNotInitiated)?;
     let current_time = e.ledger().timestamp();
     let elapsed = current_time.saturating_sub(pending_upgrade.initiated_at);
-    Ok(elapsed >= TIMELOCK_DURATION)
+    Ok(elapsed >= get_timelock_duration(e))
 }
 
 /// Check if majority vote threshold has been met.

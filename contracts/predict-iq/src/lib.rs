@@ -6,6 +6,8 @@ mod modules;
 mod test;
 #[cfg(test)]
 mod query_tests;
+#[cfg(test)]
+mod test_tie_handling;
 pub mod types;
 
 pub use errors::ErrorCode;
@@ -350,6 +352,11 @@ impl PredictIQ {
     /// Issue #13: Configurable timelock duration.
     pub fn set_timelock_duration(e: Env, seconds: u64) -> Result<(), ErrorCode> {
         crate::modules::governance::set_timelock_duration(&e, seconds)
+    }
+
+    /// Issue #13: Returns the currently active timelock duration in seconds.
+    pub fn get_timelock_duration(e: Env) -> u64 {
+        crate::modules::governance::get_timelock_duration(&e)
     }
 
     /// Issue #47: Permissionless prune after grace period.

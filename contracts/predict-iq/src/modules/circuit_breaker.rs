@@ -4,7 +4,9 @@ use crate::types::{CircuitBreakerState, ConfigKey};
 use soroban_sdk::Env;
 
 /// Cool-down period before Open transitions to HalfOpen (Issue #12).
-const COOLDOWN_SECONDS: u64 = 3600; // 1 hour
+const COOLDOWN_SECONDS: u64 = 6 * 3600; // 6 hours
+/// Max operations allowed while in HalfOpen before auto-closing back to Closed.
+const HALF_OPEN_MAX_OPS: u32 = 5;
 
 use soroban_sdk::contracttype;
 
@@ -12,6 +14,7 @@ use soroban_sdk::contracttype;
 #[derive(Clone)]
 pub enum DataKey {
     OpenedAt,
+    HalfOpenOps,
 }
 
 fn bump_gov_ttl(_e: &Env) {
@@ -24,11 +27,14 @@ pub fn set_state(e: &Env, state: CircuitBreakerState) -> Result<(), ErrorCode> {
 }
 
 fn _set_state_internal(e: &Env, state: CircuitBreakerState) -> Result<(), ErrorCode> {
-    if state == CircuitBreakerState::Open {
-        // Record when it was opened for cool-down tracking
-        e.storage()
-            .instance()
-            .set(&crate::modules::circuit_breaker::DataKey::OpenedAt, &e.ledger().timestamp());
+    match state {
+        CircuitBreakerState::Open => {
+            e.storage().instance().set(&DataKey::OpenedAt, &e.ledger().timestamp());
+        }
+        CircuitBreakerState::HalfOpen => {
+            e.storage().instance().set(&DataKey::HalfOpenOps, &0u32);
+        }
+        _ => {}
     }
 
     // Issue #38: CircuitBreakerState moved to instance storage so it stays
@@ -77,10 +83,22 @@ pub fn maybe_recover(e: &Env) {
 pub fn require_closed(e: &Env) -> Result<(), ErrorCode> {
     maybe_recover(e);
     let state = get_state(e);
-    if state == CircuitBreakerState::Open || state == CircuitBreakerState::Paused {
-        return Err(ErrorCode::ContractPaused);
+    match state {
+        CircuitBreakerState::Open | CircuitBreakerState::Paused => {
+            Err(ErrorCode::ContractPaused)
+        }
+        CircuitBreakerState::HalfOpen => {
+            let ops: u32 = e.storage().instance().get(&DataKey::HalfOpenOps).unwrap_or(0);
+            if ops >= HALF_OPEN_MAX_OPS {
+                // Probe limit exceeded — trip back to Open
+                let _ = _set_state_internal(e, CircuitBreakerState::Open);
+                return Err(ErrorCode::ContractPaused);
+            }
+            e.storage().instance().set(&DataKey::HalfOpenOps, &(ops + 1));
+            Ok(())
+        }
+        CircuitBreakerState::Closed => Ok(()),
     }
-    Ok(())
 }
 
 /// Issue #50: Guardian majority can pause without Admin consent.

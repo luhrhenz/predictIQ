@@ -312,8 +312,6 @@ pub fn bump_market_ttl(e: &Env, market_id: u64) {
 /// Issue #17: Guard prune with total_claimed check.
 /// Issue #47: Permissionless — anyone can call after grace period.
 pub fn prune_market(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
-    crate::modules::admin::require_admin(e)?;
-
     let market = get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
 
     if market.status != MarketStatus::Resolved {

@@ -34,9 +34,6 @@ pub struct Market {
     pub pending_resolution_timestamp: Option<u64>, // Timestamp when resolution was initiated
     pub dispute_snapshot_ledger: Option<u32>,  // Ledger sequence for snapshot voting
     pub dispute_timestamp: Option<u64>,        // Timestamp when dispute was filed
-    /// Issue #24: Precise per-outcome winner counter incremented on every new
-    /// unique bettor. Replaces the unsafe tally/100 heuristic in disputes.rs.
-    pub winner_counts: Map<u32, u32>,          // outcome -> unique bettor count
 }
 
 #[contracttype]
@@ -95,6 +92,11 @@ pub struct OracleConfig {
     pub min_responses: u32,          // Minimum oracle responses required (default: 1)
     pub max_staleness_seconds: u64,  // Max age of price data in seconds (default: 300)
     pub max_confidence_bps: u64,     // Max confidence interval in basis points (default: 200 = 2%)
+    pub oracle_address: Address,
+    pub feed_id: String,
+    pub min_responses: Option<u32>, // Optimized: None defaults to 1
+    pub max_staleness_seconds: u64, // Max age of price data in seconds
+    pub max_confidence_bps: u64,    // Max confidence interval in basis points
 }
 
 // Gas optimization constants
@@ -156,6 +158,14 @@ pub const TTL_LOW_THRESHOLD: u32 = 17_280;     // ~1 day
 /// Issue #36: Raised from 30 days to 90 days so data outlives the prune grace period.
 pub const TTL_HIGH_THRESHOLD: u32 = 1_555_200; // ~90 days
 pub const PRUNE_GRACE_PERIOD: u64 = 2_592_000; // 30 days in seconds
+
+/// Issue #100: Bet records must survive the full market lifecycle including
+/// extended dispute windows. A market can remain Disputed for up to 72 hours
+/// of voting, plus any admin fallback period. We set bet TTL to ~180 days so
+/// a record placed on day 0 is still readable when the winner claims on day 90+.
+/// Low threshold triggers a refresh when fewer than 90 days remain.
+pub const BET_TTL_LOW_THRESHOLD: u32 = 1_555_200;  // ~90 days  — refresh trigger
+pub const BET_TTL_HIGH_THRESHOLD: u32 = 3_110_400; // ~180 days — target lifetime
 
 pub const GOV_TTL_LOW_THRESHOLD: u32 = 1_555_200;  // ~90 days
 pub const GOV_TTL_HIGH_THRESHOLD: u32 = 3_110_400; // ~180 days

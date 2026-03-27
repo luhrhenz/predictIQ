@@ -407,7 +407,7 @@ fn test_tiered_commission_rates() {
 }
 
 #[test]
-fn test_admin_can_reduce_push_threshold_for_gas_intensive_tokens() {
+fn test_push_mode_market_fails_resolution_when_winners_exceed_threshold() {
     let (e, _admin, _contract_id, client) = setup_test_env();
     client.set_creation_deposit(&0);
 
@@ -437,7 +437,7 @@ fn test_admin_can_reduce_push_threshold_for_gas_intensive_tokens() {
     client.set_max_push_payout_winners(&10);
     assert_eq!(client.get_max_push_payout_winners(), 10);
 
-    let market_lowered = create_test_market(
+    let market_id = create_test_market(
         &client,
         &e,
         &creator,
@@ -673,6 +673,36 @@ fn test_add_guardian() {
     assert_eq!(stored_guardians.len(), 2);
 }
 
+// Issue #19: Admin-Guardian separation tests
+
+#[test]
+fn test_add_admin_as_guardian_rejected() {
+    let (e, admin, _contract_id, client) = setup_test_env();
+
+    let guardian = Address::generate(&e);
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian { address: guardian.clone(), voting_power: 1 });
+    client.initialize_guardians(&guardians);
+
+    // Attempt to add the admin address as a guardian — must be rejected
+    let result = client.try_add_guardian(&types::Guardian {
+        address: admin.clone(),
+        voting_power: 1,
+    });
+    assert_eq!(result, Err(Ok(ErrorCode::NotAuthorized)));
+}
+
+#[test]
+fn test_initialize_guardians_with_admin_rejected() {
+    let (e, admin, _contract_id, client) = setup_test_env();
+
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian { address: admin.clone(), voting_power: 1 });
+
+    let result = client.try_initialize_guardians(&guardians);
+    assert_eq!(result, Err(Ok(ErrorCode::NotAuthorized)));
+}
+
 #[test]
 fn test_initiate_upgrade_starts_timelock() {
     let (e, admin, _contract_id, client) = setup_test_env();
@@ -797,6 +827,66 @@ fn test_insufficient_votes_to_execute() {
     // Execute should fail - insufficient votes
     let result = client.try_execute_upgrade();
     assert_eq!(result, Err(Ok(ErrorCode::InsufficientVotes)));
+}
+
+// Issue #13: configurable timelock tests
+
+#[test]
+fn test_set_timelock_duration_and_early_execution() {
+    let (e, _admin, _contract_id, client) = setup_test_env();
+
+    let guardian = Address::generate(&e);
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian {
+        address: guardian.clone(),
+        voting_power: 1,
+    });
+    client.initialize_guardians(&guardians);
+
+    // Reduce timelock to 6 hours (minimum allowed)
+    let six_hours: u64 = 6 * 60 * 60;
+    assert!(client.try_set_timelock_duration(&six_hours).is_ok());
+
+    let wasm_hash = upgrade_wasm_hash(&e);
+    e.ledger().set_timestamp(1000);
+    client.initiate_upgrade(&wasm_hash);
+    client.vote_for_upgrade(&guardian, &true);
+
+    // Still blocked before 6 hours
+    e.ledger().set_timestamp(1000 + six_hours - 1);
+    assert_eq!(client.try_execute_upgrade(), Err(Ok(ErrorCode::TimelockActive)));
+
+    // Succeeds exactly at 6 hours
+    e.ledger().set_timestamp(1000 + six_hours);
+    assert!(client.try_execute_upgrade().is_ok());
+}
+
+#[test]
+fn test_set_timelock_duration_out_of_range_rejected() {
+    let (_e, _admin, _contract_id, client) = setup_test_env();
+
+    // Below minimum (6h)
+    assert_eq!(
+        client.try_set_timelock_duration(&(6 * 3600 - 1)),
+        Err(Ok(ErrorCode::InvalidAmount))
+    );
+    // Above maximum (7 days)
+    assert_eq!(
+        client.try_set_timelock_duration(&(7 * 24 * 3600 + 1)),
+        Err(Ok(ErrorCode::InvalidAmount))
+    );
+}
+
+#[test]
+fn test_get_timelock_duration_default_and_updated() {
+    let (_e, _admin, _contract_id, client) = setup_test_env();
+
+    // Default should be 48 hours
+    assert_eq!(client.get_timelock_duration(), 48 * 3600);
+
+    // After update, reflects new value
+    client.set_timelock_duration(&(6 * 3600));
+    assert_eq!(client.get_timelock_duration(), 6 * 3600);
 }
 
 #[test]
